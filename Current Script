@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+
+import numpy as np
+from pathlib import Path
+from nilearn.masking import apply_mask
+from nilearn.signal import clean
+from nilearn.interfaces.fmriprep import load_confounds
+import matplotlib.pyplot as plt
+
+# === Paths ===
+func_path = Path('/BICNAS2/group-northoff/rsfMRI-FEOBV/sub-002/ses-002/func/sub-002_ses-002_task-rest_run-02_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz')
+mask_dir = Path('./ROIs_NII')
+output_dir = Path('./voxelwise_timeseries_manual')
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# === Load confounds using Nilearn helper (pass path as string!) ===
+confounds, confound_names = load_confounds(
+    str(func_path),  # Must be a string, not Path
+    strategy=["motion", "high_pass", "wm_csf"]
+)
+
+print("Confounds columns used:", confound_names)
+
+# === Load masks ===
+layers = {
+    'Exteroception': list(mask_dir.glob('Exteroception_*.nii.gz')),
+    'Interoception': list(mask_dir.glob('Interoception_*.nii.gz')),
+    'Cognition': list(mask_dir.glob('Cognition_*.nii.gz'))
+}
+
+# === Process masks ===
+for layer, mask_paths in layers.items():
+    print(f"\nProcessing {layer}")
+    layer_output = output_dir / layer
+    layer_output.mkdir(exist_ok=True)
+
+    for mask_path in mask_paths:
+        mask_name = mask_path.stem
+        print(f"  Mask: {mask_name}")
+
+        # Apply mask to extract voxelwise time series
+        masked_ts = apply_mask(str(func_path), str(mask_path))  # shape: (T, n_voxels)
+
+        # Denoise time series
+        cleaned_ts = clean(masked_ts, confounds=confounds, standardize="zscore_sample")
+
+        # Save result
+        save_path = layer_output / f"{func_path.stem}_{mask_name}_voxelwise_timeseries.npy"
+        np.save(save_path, cleaned_ts)
+        print(f"    Saved: {save_path.name}")
+
+print("\n[Done] All voxelwise time series extracted and saved.")
