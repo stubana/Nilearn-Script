@@ -1,86 +1,74 @@
-#!/usr/bin/env python3
-
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from nilearn.masking import apply_mask
 from nilearn.signal import clean
+import logging
 
-# === Paths ===
-func_path = Path('/BICNAS2/group-northoff/rsfMRI-FEOBV/sub-002/ses-002/func/sub-002_ses-002_task-rest_run-02_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz')
-mask_dir = Path('/home/stubanadean/ROIs_NII')  # Make sure this path is correct for your masks
-output_dir = Path('/home/stubanadean/voxelwise_timeseries_nilearn')
-output_dir.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# === Build confounds filepath based on func_path ===
-base = func_path.name.split('_space-')[0]  # Cut off from _space- onward
-confound_file = func_path.parent / f"{base}_desc-confounds_timeseries.tsv"
+def load_and_clean_confounds(confound_file, selected_columns):
+    confounds_df = pd.read_csv(confound_file, sep='\t')
+    cols = [col for col in selected_columns if col in confounds_df.columns]
+    confounds = confounds_df[cols].values
+    logging.info(f"Loaded confounds with columns: {cols}")
 
-print(f"Confound file: {confound_file}")
+    if np.isnan(confounds).any() or np.isinf(confounds).any():
+        logging.warning("NaNs or infs detected in confounds; cleaning now...")
+        confounds = np.nan_to_num(confounds, nan=0.0, posinf=0.0, neginf=0.0)
 
-# === Load confounds manually ===
-confounds_df = pd.read_csv(confound_file, sep='\t')
+    return confounds
 
-# === Select relevant confound columns ===
-selected_columns = [
-    'trans_x', 'trans_y', 'trans_z',
-    'rot_x', 'rot_y', 'rot_z',
-    'framewise_displacement',
-    'a_comp_cor_00', 'a_comp_cor_01'
-]
+def extract_and_clean_timeseries(func_path, mask_path, confounds):
+    ts = apply_mask(str(func_path), str(mask_path))
+    logging.info(f"Extracted time series shape from {mask_path.name}: {ts.shape}")
 
-# Keep only columns that exist in the confounds file
-selected_columns = [col for col in selected_columns if col in confounds_df.columns]
+    valid_voxels = np.all(np.isfinite(ts), axis=0)
+    if not np.any(valid_voxels):
+        raise ValueError(f"All voxels contain NaNs or infs in mask {mask_path.name}")
 
-confounds = confounds_df[selected_columns].values
+    ts_clean = ts[:, valid_voxels]
+    ts_clean = clean(ts_clean, confounds=confounds, standardize="zscore_sample")
 
-print("Using confounds columns:", selected_columns)
+    if not np.all(np.isfinite(ts_clean)):
+        raise ValueError(f"NaNs or infs detected after cleaning for mask {mask_path.name}")
 
-# === Load masks ===
-layers = {
-    'Exteroception': list(mask_dir.glob('Exteroception_*.nii*')),
-    'Interoception': list(mask_dir.glob('Interoception_*.nii*')),
-    'Cognition': list(mask_dir.glob('Cognition_*.nii*'))
-}
+    return ts_clean
 
-# === Process masks ===
-for layer, mask_paths in layers.items():
-    print(f"\nProcessing {layer}")
-    layer_output = output_dir / layer
-    layer_output.mkdir(exist_ok=True)
+def main():
+    func_path = Path('/path/to/func.nii.gz')
+    confound_file = func_path.parent / f"{func_path.stem}_desc-confounds_timeseries.tsv"
+    output_dir = Path('/path/to/output')
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not mask_paths:
-        print(f"  No masks found for {layer}")
-        continue
+    selected_confounds = [
+        'trans_x', 'trans_y', 'trans_z',
+        'rot_x', 'rot_y', 'rot_z',
+        'framewise_displacement',
+        'a_comp_cor_00', 'a_comp_cor_01'
+    ]
 
-    for mask_path in mask_paths:
-        mask_name = mask_path.stem
-        print(f"  Mask: {mask_name}")
+    confounds = load_and_clean_confounds(confound_file, selected_confounds)
+
+    layers = {
+        'Exteroception': Path('/home/stubanadean/ROIs_NII/Exteroception.nii.gz'),
+        'Interoception': Path('/home/stubanadean/ROIs_NII/Interoception.nii.gz'),
+        'Cognition': Path('/home/stubanadean/ROIs_NII/Cognition.nii.gz')
+    }
+
+    for layer_name, mask_path in layers.items():
+        logging.info(f"Processing layer: {layer_name}")
+        layer_output_dir = output_dir / layer_name
+        layer_output_dir.mkdir(exist_ok=True)
 
         try:
-            # Extract voxelwise time series (shape: timepoints x voxels)
-            masked_ts = apply_mask(str(func_path), str(mask_path))
-            print(f"    Extracted time series shape: {masked_ts.shape}")
-
-            # Remove voxels with any NaN or inf values
-            valid_voxels = np.all(np.isfinite(masked_ts), axis=0)
-
-            if not np.any(valid_voxels):
-                print(f"    Warning: All voxels contain NaNs or infs for {mask_name}. Skipping.")
-                continue
-
-            cleaned_masked_ts = masked_ts[:, valid_voxels]
-
-            # Denoise time series using confounds
-            cleaned_ts = clean(cleaned_masked_ts, confounds=confounds, standardize="zscore_sample")
-
-            # Save cleaned voxelwise time series
-            save_path = layer_output / f"{func_path.stem}_{mask_name}_voxelwise_timeseries.npy"
-            np.save(save_path, cleaned_ts)
-            print(f"    Saved: {save_path.name}")
-
+            ts_clean = extract_and_clean_timeseries(func_path, mask_path, confounds)
+            save_path = layer_output_dir / f"{func_path.stem}_{mask_path.stem}_voxelwise_timeseries.npy"
+            np.save(save_path, ts_clean)
+            logging.info(f"Saved cleaned timeseries to {save_path}")
         except Exception as e:
-            print(f"    Error processing {mask_name}: {e}")
+            logging.error(f"Failed processing {mask_path.name}: {e}")
 
-print("\n[Done] All voxelwise time series extracted and saved.")
+if __name__ == '__main__':
+    main()
 
